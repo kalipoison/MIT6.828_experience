@@ -184,3 +184,19 @@ page_alloc(int alloc_flags)
 　　2. 把该结构体插入回page_free_list空闲页链表。
 
 　　代码如下：
+
+```c
+void
+page_free(struct PageInfo *pp)
+{
+    // Fill this function in
+    // Hint: You may want to panic if pp->pp_ref is nonzero or
+    // pp->pp_link is not NULL.
+      assert(pp->pp_ref == 0);
+      assert(pp->pp_link == NULL);
+
+      pp->pp_link = page_free_list;
+      page_free_list = pp;
+}
+```
+
