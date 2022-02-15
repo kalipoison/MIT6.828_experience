@@ -42,11 +42,7 @@
  60 TRAPHANDLER(stack_entry, T_STACK);
  61 TRAPHANDLER(gpflt_entry, T_GPFLT);
  62 TRAPHANDLER(pgflt_entry, T_PGFLT);
- 63 TRAPHANDLER_NOEC(fperr_entry, T_FPERR);
- 64 TRAPHANDLER(align_entry, T_ALIGN);
- 65 TRAPHANDLER_NOEC(mchk_entry, T_MCHK);
- 66 TRAPHANDLER_NOEC(simderr_entry, T_SIMDERR);
- 67 TRAPHANDLER_NOEC(syscall_entry, T_SYSCALL);
+
 ```
 
 然后就会调用 _alltraps，_alltraps函数其实就是为了能够让程序在之后调用trap.c中的trap函数时，能够正确的访问到输入的参数，即Trapframe指针类型的输入参数tf。
@@ -94,11 +90,7 @@ trap_init(void)
         SETGATE(idt[T_STACK], 0, GD_KT, stack_entry, 0);
         SETGATE(idt[T_GPFLT], 0, GD_KT, gpflt_entry, 0);
         SETGATE(idt[T_PGFLT], 0, GD_KT, pgflt_entry, 0);
-        SETGATE(idt[T_FPERR], 0, GD_KT, fperr_entry, 0);
-        SETGATE(idt[T_ALIGN], 0, GD_KT, align_entry, 0);
-        SETGATE(idt[T_MCHK], 0, GD_KT, mchk_entry, 0);
-        SETGATE(idt[T_SIMDERR], 0, GD_KT, simderr_entry, 0);
-        SETGATE(idt[T_SYSCALL], 0, GD_KT, syscall_entry, 3);
+ 
         // Per-CPU setup 
         trap_init_percpu();
 }
