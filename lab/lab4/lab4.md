@@ -210,3 +210,217 @@ Unix 提供`fork()`系统调用作为其进程创建原语。Unix`fork()`复制�
 
 
 **Exercise 7**
+
+
+
+# Part B: Copy-on-Write Fork
+
+如前所述，Unix 提供`fork()`系统调用作为其主要的进程创建原语。`fork()`系统调用复制调用进程（父进程）的地址空间来创建一个新进程（子进程） 。
+
+xv6 Unix`fork()`通过将所有数据从父页面复制到分配给子页面的新页面来实现。这基本上与采取的方法相同`dumbfork()`。将父级地址空间复制到子级是该`fork()`操作中最昂贵的部分。
+
+然而，在子进程中`fork()` 调用to 之后通常几乎立即调用to `exec()`，这会用新程序替换子进程的内存。例如，这就是 shell 通常所做的事情。在这种情况下，复制父地址空间所花费的时间在很大程度上被浪费了，因为子进程在调用`exec()`.
+
+出于这个原因，更高版本的 Unix 利用虚拟内存硬件允许父子进程*共享* 映射到各自地址空间的内存，直到其中一个进程实际修改它为止。这种技术被称为*写时复制*。为此，`fork()`内核将复制地址空间*映射* 从父到子而不是映射页面的内容，同时将现在共享的页面标记为只读。当两个进程之一尝试写入这些共享页面之一时，该进程会发生页面错误。此时，Unix 内核意识到该页面实际上是一个“虚拟”或“写时复制”副本，因此它为出错的进程创建了一个新的、私有的、可写的页面副本。通过这种方式，各个页面的内容在实际写入之前不会被实际复制。这种优化使得子进程中的 a`fork()`后跟 an`exec()`成本更低：子进程在调用 之前可能只需要复制一页（其堆栈的当前页）`exec()`。
+
+在本实验的下一部分中，您将实现一个“适当的”类 Unix 并`fork()`使用写时复制，作为用户空间库例程。在用户空间实现`fork()`和写时复制支持的好处是内核保持简单得多，因此更可能是正确的。它还允许单独的用户模式程序为`fork()`. 想要稍微不同的实现的程序（例如，昂贵的始终复制版本`dumbfork()`，或者之后父子实际共享内存的程序）可以轻松地提供自己的实现。
+
+
+
+#### **User-level page fault handling**
+
+用户级别的写时复制`fork()`需要了解写保护页面上的页面错误，因此这是您首先要实现的。写时复制只是用户级页面错误处理的许多可能用途之一。
+
+设置地址空间是很常见的，以便页面错误指示何时需要执行某些操作。例如，大多数 Unix 内核最初只映射一个新进程的堆栈区域中的单个页面，然后随着进程的堆栈消耗增加并导致尚未映射的堆栈地址上的页面错误，“按需”分配和映射额外的堆栈页面。典型的 Unix 内核必须跟踪在进程空间的每个区域发生页面错误时要采取的操作。例如，堆栈区域中的故障通常会分配和映射新的物理内存页面。程序的 BSS 区域中的故障通常会分配一个新页面，用零填充它，然后映射它。在具有按需分页可执行文件的系统中，
+
+这是内核需要跟踪的大量信息。与采用传统的 Unix 方法不同，您将决定如何处理用户空间中的每个页面错误，其中错误的破坏性较小。这种设计的另一个好处是允许程序在定义其内存区域时具有很大的灵活性；稍后您将使用用户级页面错误处理来映射和访问基于磁盘的文件系统上的文件。
+
+
+
+#### Setting the Page Fault Handler
+
+为了处理自己的页面错误，用户环境需要向JOS 内核注册一个*页面错误处理程序入口点。*`sys_env_set_pgfault_upcall`用户环境通过新的系统调用注册其页面错误入口点。我们在`Env`结构 中添加了一个新成员`env_pgfault_upcall`, 来记录此信息。
+
+
+
+**Exercise 8**
+
+
+
+### Normal and Exception Stacks in User Environments
+
+在正常执行期间，JOS 中的用户环境将在*正常*用户堆栈上运行：它的`ESP`寄存器开始指向`USTACKTOP`，并且它推送的堆栈数据驻留在中间`USTACKTOP-PGSIZE`和`USTACKTOP-1`包含的页面上。*但是，当在用户模式下发生页面错误时，内核将重新启动用户环境，在不同的堆栈（即用户异常*堆栈）上运行指定的用户级页面错误处理程序。本质上，我们将使 JOS 内核代表用户环境实现自动“堆栈切换”，就像 x86*处理器* 在从用户模式转移到内核模式时已经代表 JOS 实现堆栈切换一样！
+
+JOS 用户异常栈也是一页大小，并且它的顶部被定义在虚拟地址`UXSTACKTOP`，所以用户异常栈的有效字节是 from `UXSTACKTOP-PGSIZE`through `UXSTACKTOP-1`inclusive。在此异常堆栈上运行时，用户级页面错误处理程序可以使用 JOS 的常规系统调用来映射新页面或调整映射，以修复最初导致页面错误的任何问题。然后，用户级页面错误处理程序通过汇编语言存根返回到原始堆栈上的错误代码。
+
+`sys_page_alloc()`每个想要支持用户级页面错误处理的用户环境都需要使用A 部分中介绍的系统调用 为其自己的异常堆栈分配内存。
+
+总结：
+
+​		在正常运行期间，用户进程运行在用户栈上，栈顶寄存器ESP指向USTACKTOP处，堆栈数据位于USTACKTOP-PGSIZE 与USTACKTOP-1之间的页。当在用户模式发生1个page fault时，内核将在专门处理page fault的用户异常栈上重新启动进程。
+　　而异常栈则是为了上面设置的异常处理例程设立的。当异常发生时，而且该用户进程注册了该异常的处理例程，那么就会转到异常栈上，运行异常处理例程。
+　　到目前位置出现了三个栈：
+　　[KSTACKTOP, KSTACKTOP-KSTKSIZE]
+　　内核态系统栈
+
+　　[UXSTACKTOP, UXSTACKTOP - PGSIZE]
+　　用户态错误处理栈
+
+　　[USTACKTOP, UTEXT]
+　　用户态运行栈
+
+　　内核态系统栈是运行内核相关程序的栈，在有中断被触发之后，CPU会将栈自动切换到内核栈上来，而内核栈的设置是在kern/trap.c的trap_init_percpu()中设置的。
+
+```c
+void
+trap_init_percpu(void)
+{
+    // Setup a TSS so that we get the right stack
+    // when we trap to the kernel.
+
+    thiscpu->cpu_ts.ts_esp0 = (uintptr_t)percpu_kstacks[cpunum()];
+    thiscpu->cpu_ts.ts_ss0 = GD_KD;
+    thiscpu->cpu_ts.ts_iomb = sizeof(struct Taskstate);
+
+    // Initialize the TSS slot of the gdt.
+    gdt[(GD_TSS0 >> 3) + thiscpu->cpu_id] = SEG16(STS_T32A, (uint32_t) (&thiscpu->cpu_ts),
+                                                  sizeof(struct Taskstate) - 1, 0);
+    gdt[(GD_TSS0 >> 3) + thiscpu->cpu_id].sd_s = 0;
+
+    // Load the TSS selector (like other segment selectors, the
+    // bottom three bits are special; we leave them 0)
+    ltr(GD_TSS0 + (thiscpu->cpu_id << 3));
+
+    // Load the IDT
+    lidt(&idt_pd);
+    
+}
+```
+
+用户定义注册了自己的中断处理程序之后，相应的例程运行时的栈，整个过程如下：
+　　首先陷入到内核，栈位置从用户运行栈切换到内核栈，进入到trap中，进行中断处理分发，进入到page_fault_handler()
+当确认是用户程序触发的page fault的时候(内核触发的直接panic了)，为其在用户错误栈里分配一个UTrapframe的大小
+把栈切换到用户错误栈，运行响应的用户中断处理程序中断处理程序可能会触发另外一个同类型的中断，这个时候就会产生递归式的处理。处理完成之后，返回到用户运行栈。
+
+
+
+#### Invoking the User Page Fault Handler
+
+您现在需要更改`kern/trap.c`中的页面错误处理代码 以处理来自用户模式的页面错误，如下所示。我们将故障发生时用户环境的状态称为*陷阱时*状态。
+
+如果没有注册页面错误处理程序，JOS 内核会像以前一样使用消息破坏用户环境。否则，内核会在异常堆栈上设置一个陷阱帧，看起来像`struct UTrapframe`来自`inc/trap.h`：
+
+```
+                    <-- UXSTACKTOP
+trap-time esp
+trap-time eflags
+trap-time eip
+trap-time eax       start of struct PushRegs
+trap-time ecx
+trap-time edx
+trap-time ebx
+trap-time esp
+trap-time ebp
+trap-time esi
+trap-time edi       end of struct PushRegs
+tf_err (error code)
+fault_va            <-- %esp when handler is run
+```
+
+然后内核安排用户环境恢复执行，并使用此堆栈帧在异常堆栈上运行的页面错误处理程序；你必须弄清楚如何做到这一点。fault_va是导致页面错误的虚拟地址 `。`
+
+如果发生异常时 用户环境*已经在用户异常堆栈上运行，则页面错误处理程序本身已发生错误。*在这种情况下，您应该在 current `tf->tf_esp`而不是 at下启动新的堆栈帧`UXSTACKTOP`。您应该首先压入一个空的 32 位字，然后压入一个`struct UTrapframe`.
+
+要测试是否`tf->tf_esp`已经在用户异常堆栈上，请检查它是否在 和 之间的范围内`UXSTACKTOP-PGSIZE`，`UXSTACKTOP-1`包括在内。
+
+总结：
+
+可以将用户自己定义的用户处理进程当作是一次函数调用看待，当错误发生的时候，调用一个函数，但实际上还是当前这个进程，并没有发生变化。所以当切换到异常栈的时候，依然运行当前进程，但只是运行的中断处理函数，所以说此时的栈指针发生了变化，而且程序计数器eip也发生了变化，同时还需要知道的是引发错误的地址在哪。这些都是要在切换到异常栈的时候需要传递的信息。和之前从用户栈切换到内核栈一样，这里是通过在栈上构造结构体，传递指针完成的。
+　　这里新定义了一个结构体用来记录出现用户定义错误时候的信息Utrapframe：
+
+```c
+struct UTrapframe {
+        /* information about the fault */
+        uint32_t utf_fault_va;  /* va for T_PGFLT, 0 otherwise */
+        uint32_t utf_err;
+        /* trap-time return state */
+        struct PushRegs utf_regs;
+        uintptr_t utf_eip;
+        uint32_t utf_eflags;
+        /* the trap-time stack to return to */
+        uintptr_t utf_esp;
+} __attribute__((packed));
+```
+
+相比于UTrapframe，这里多了utf_fault_va，因为要记录触发错误的内存地址，同时还少了es,ds,ss等。因为从用户态栈切换到异常栈，或者从异常栈再切换回去，实际上都是一个用户进程，所以不涉及到段的切换，不用记录。在实际使用中，Trapframe是作为记录进程完整状态的结构体存在的，也作为函数参数进行传递；而UTrapframe只在处理用户定义错误的时候用。到
+　　整体上讲，当正常执行过程中发生了页错误，那么栈的切换是
+　　用户运行栈—>内核栈—>异常栈
+　　而如果在异常处理程序中发生了也错误，那么栈的切换是
+　　异常栈—>内核栈—>异常栈
+
+
+
+**Exercise 9**
+
+
+
+#### User-mode Page Fault Entrypoint
+
+接下来，您需要实现汇编例程，该例程将负责调用 C 页面错误处理程序并在原始错误指令处恢复执行。这个汇编例程是将使用`sys_env_set_pgfault_upcall()`.
+
+
+
+**Exercise 10**
+
+
+
+最后，需要实现用户级缺页处理机制的C用户库端。
+
+
+
+**Exercise 11**
+
+
+
+#### Implementing Copy-on-Write Fork
+
+您现在拥有`fork()` 完全在用户空间中实现写时复制的内核工具。
+
+我们`fork()` 在`lib/fork.c`中为您提供了一个骨架。比如`dumbfork()`， `fork()`应该新建一个环境，然后扫描父环境的整个地址空间，在子环境中设置相应的页面映射。关键区别在于，虽然`dumbfork()`复制了*页面*， 但`fork()`最初只会复制页面*映射*。 `fork()`仅当其中一个环境尝试写入时才会复制每一页。
+
+基本控制流程`fork()`如下：
+
+1. 父级安装`pgfault()` 为 C 级页面错误处理程序，使用`set_pgfault_handler()`您在上面实现的功能。
+
+2. 父调用`sys_exofork()`创建子环境。
+
+3. 对于 UTOP 下其地址空间中的每个可写或写时复制页面，父调用duppage，它应该将写时复制页面映射到子地址空间中，然后将写时复制页面
+
+   重新映射
+
+   到其自己的地址空间。[注意：这里的顺序（即，在子页面中将页面标记为母牛，然后在父页面中标记它）实际上很重要！你能看出为什么吗？试着想一个特殊的情况，如果颠倒顺序可能会导致麻烦。duppage
+
+   设置两个 PTE 以使页面不可写，并包含PTE_COW
+
+   在“可用”字段中以区分写时复制页面和真正的只读页面。
+
+   但是，异常堆栈*不会*以这种方式重新映射。相反，您需要在子进程中为异常堆栈分配一个新页面。由于缺页处理程序将进行实际的复制，并且缺页处理程序在异常堆栈上运行，因此不能将异常堆栈复制到写入时：谁来复制它？
+
+   `fork()`还需要处理存在但不可写或写时复制的页面。
+
+4. 父级为子级设置用户页面错误入口点，使其看起来像自己的。
+
+5. 孩子现在准备好运行，所以父母将其标记为可运行。
+
+每次其中一个环境写入它尚未写入的写时复制页面时，都会发生页面错误。这是用户页面错误处理程序的控制流程：
+
+1. 内核将页面错误传播到`_pgfault_upcall`调用`fork()`的`pgfault()`处理程序。
+2. `pgfault()`检查故障是否为写入（检查`FEC_WR`错误代码）并且页面的 PTE 是否标记为`PTE_COW`。如果没有，恐慌。
+3. `pgfault()`分配一个映射在临时位置的新页面，并将错误页面的内容复制到其中。然后故障处理程序将新页面映射到具有读/写权限的适当地址，以代替旧的只读映射。
+
+用户级别的`lib/fork.c`代码必须查阅环境的页表以进行上述几个操作（例如，页面的 PTE 标记为`PTE_COW`）。`UVPT`内核正是为此目的映射环境的页表 。它使用了一种[巧妙的映射技巧](https://pdos.csail.mit.edu/6.828/2018/labs/lab4/uvpt.html)，使查找用户代码的 PTE 变得容易。`lib/entry.S`设置`uvpt`， `uvpd`以便您可以轻松地在 `lib/fork.c`中查找页表信息。
+
+
+
+**Exercise 12**
+
